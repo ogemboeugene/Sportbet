@@ -6,6 +6,9 @@
 [![NestJS](https://img.shields.io/badge/NestJS-10+-E0234E.svg)](https://nestjs.com/)
 [![MongoDB](https://img.shields.io/badge/MongoDB-Atlas-47A248.svg)](https://www.mongodb.com/)
 [![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg)](https://www.docker.com/)
+[![Security](https://img.shields.io/badge/Security-Verified-success.svg)](./SECURITY_INCIDENT_REPORT.md)
+
+> **🔒 Security Notice:** This repository underwent a security incident on July 27, 2025, which has been fully resolved. All exposed credentials were sanitized and the git history was cleaned. See [SECURITY_INCIDENT_REPORT.md](./SECURITY_INCIDENT_REPORT.md) for details.
 
 ## 🎯 Overview
 
