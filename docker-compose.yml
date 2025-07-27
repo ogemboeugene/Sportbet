@@ -1,0 +1,237 @@
+version: '3.8'
+
+services:
+  # Frontend Service
+  frontend:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: ${VITE_API_URL}
+        VITE_FIREBASE_API_KEY: ${VITE_FIREBASE_API_KEY}
+        VITE_FIREBASE_AUTH_DOMAIN: ${VITE_FIREBASE_AUTH_DOMAIN}
+        VITE_FIREBASE_PROJECT_ID: ${VITE_FIREBASE_PROJECT_ID}
+        VITE_FIREBASE_STORAGE_BUCKET: ${VITE_FIREBASE_STORAGE_BUCKET}
+        VITE_FIREBASE_MESSAGING_SENDER_ID: ${VITE_FIREBASE_MESSAGING_SENDER_ID}
+        VITE_FIREBASE_APP_ID: ${VITE_FIREBASE_APP_ID}
+    container_name: sportbet-frontend
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - sportbet-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Backend Service
+  backend:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: sportbet-backend
+    ports:
+      - "3000:3000"
+    environment:
+      # Database
+      MONGODB_URI: ${MONGODB_URI}
+      REDIS_URL: redis://redis:6379
+      
+      # Application
+      NODE_ENV: production
+      PORT: 3000
+      API_URL: ${API_URL}
+      CLIENT_URL: ${CLIENT_URL}
+      CORS_ORIGIN: ${CORS_ORIGIN}
+      
+      # Authentication
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN}
+      ADMIN_JWT_SECRET: ${ADMIN_JWT_SECRET}
+      ADMIN_JWT_EXPIRES_IN: ${ADMIN_JWT_EXPIRES_IN}
+      
+      # Security
+      BCRYPT_ROUNDS: ${BCRYPT_ROUNDS}
+      ENCRYPTION_MASTER_KEY: ${ENCRYPTION_MASTER_KEY}
+      KEY_DERIVATION_SALT: ${KEY_DERIVATION_SALT}
+      CSRF_SECRET: ${CSRF_SECRET}
+      SESSION_SECRET: ${SESSION_SECRET}
+      
+      # Firebase
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID}
+      FIREBASE_CLIENT_EMAIL: ${FIREBASE_CLIENT_EMAIL}
+      FIREBASE_PRIVATE_KEY: ${FIREBASE_PRIVATE_KEY}
+      FIREBASE_STORAGE_BUCKET: ${FIREBASE_STORAGE_BUCKET}
+      
+      # Payment Gateways
+      FLUTTERWAVE_PUBLIC_KEY: ${FLUTTERWAVE_PUBLIC_KEY}
+      FLUTTERWAVE_SECRET_KEY: ${FLUTTERWAVE_SECRET_KEY}
+      PAYSTACK_PUBLIC_KEY: ${PAYSTACK_PUBLIC_KEY}
+      PAYSTACK_SECRET_KEY: ${PAYSTACK_SECRET_KEY}
+      STRIPE_PUBLISHABLE_KEY: ${STRIPE_PUBLISHABLE_KEY}
+      STRIPE_SECRET_KEY: ${STRIPE_SECRET_KEY}
+      MPESA_CONSUMER_KEY: ${MPESA_CONSUMER_KEY}
+      MPESA_CONSUMER_SECRET: ${MPESA_CONSUMER_SECRET}
+      PAYPAL_CLIENT_ID: ${PAYPAL_CLIENT_ID}
+      PAYPAL_CLIENT_SECRET: ${PAYPAL_CLIENT_SECRET}
+      
+      # External APIs
+      ODDS_API_KEY: ${ODDS_API_KEY}
+      SUMSUB_API_KEY: ${SUMSUB_API_KEY}
+      SUMSUB_SECRET_KEY: ${SUMSUB_SECRET_KEY}
+      AFRICAS_TALKING_USERNAME: ${AFRICAS_TALKING_USERNAME}
+      AFRICAS_TALKING_API_KEY: ${AFRICAS_TALKING_API_KEY}
+      
+      # Performance
+      UV_THREADPOOL_SIZE: 4
+      MONGODB_MAX_POOL_SIZE: 10
+      MONGODB_MIN_POOL_SIZE: 2
+      REDIS_MAXMEMORY_POLICY: allkeys-lru
+      
+    depends_on:
+      - redis
+    networks:
+      - sportbet-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "dist/health-check.js"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    volumes:
+      - ./server/logs:/app/logs
+
+  # Redis Cache Service
+  redis:
+    image: redis:7-alpine
+    container_name: sportbet-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru --appendonly yes
+    networks:
+      - sportbet-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    volumes:
+      - redis_data:/data
+
+  # Nginx Load Balancer (for production scaling)
+  nginx:
+    image: nginx:alpine
+    container_name: sportbet-nginx
+    ports:
+      - "443:443"
+      - "8080:80"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - sportbet-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Monitoring with Prometheus
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: sportbet-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=200h'
+      - '--web.enable-lifecycle'
+    networks:
+      - sportbet-network
+    restart: unless-stopped
+
+  # Grafana for visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: sportbet-grafana
+    ports:
+      - "3001:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_USERS_ALLOW_SIGN_UP: false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./monitoring/grafana/dashboards:/etc/grafana/provisioning/dashboards:ro
+      - ./monitoring/grafana/datasources:/etc/grafana/provisioning/datasources:ro
+    depends_on:
+      - prometheus
+    networks:
+      - sportbet-network
+    restart: unless-stopped
+
+  # Log aggregation with Loki
+  loki:
+    image: grafana/loki:latest
+    container_name: sportbet-loki
+    ports:
+      - "3100:3100"
+    volumes:
+      - ./monitoring/loki-config.yaml:/etc/loki/local-config.yaml:ro
+      - loki_data:/loki
+    command: -config.file=/etc/loki/local-config.yaml
+    networks:
+      - sportbet-network
+    restart: unless-stopped
+
+  # Log collection with Promtail
+  promtail:
+    image: grafana/promtail:latest
+    container_name: sportbet-promtail
+    volumes:
+      - ./monitoring/promtail-config.yaml:/etc/promtail/config.yml:ro
+      - ./server/logs:/var/log/sportbet:ro
+      - nginx_logs:/var/log/nginx:ro
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+    command: -config.file=/etc/promtail/config.yml
+    depends_on:
+      - loki
+    networks:
+      - sportbet-network
+    restart: unless-stopped
+
+networks:
+  sportbet-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+
+volumes:
+  redis_data:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  loki_data:
+    driver: local
+  nginx_logs:
+    driver: local

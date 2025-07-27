@@ -1,0 +1,351 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  NODE_VERSION: '18'
+  MONGODB_URI: ${{ secrets.MONGODB_URI }}
+  JWT_SECRET: ${{ secrets.JWT_SECRET }}
+
+jobs:
+  # Code Quality & Security Checks
+  code-quality:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: |
+        npm ci --prefix client
+        npm ci --prefix server
+
+    - name: Run ESLint (Client)
+      run: npm run lint --prefix client
+
+    - name: Run ESLint (Server)
+      run: npm run lint --prefix server
+
+    - name: Run Prettier Check
+      run: |
+        npm run format:check --prefix client
+        npm run format:check --prefix server
+
+    - name: TypeScript Type Check (Client)
+      run: npm run type-check --prefix client
+
+    - name: TypeScript Type Check (Server)
+      run: npm run type-check --prefix server
+
+    - name: Security Audit (Client)
+      run: npm audit --audit-level high --prefix client
+
+    - name: Security Audit (Server)
+      run: npm audit --audit-level high --prefix server
+
+    - name: OWASP Dependency Check
+      uses: dependency-check/Dependency-Check_Action@main
+      with:
+        project: 'SportBet'
+        path: '.'
+        format: 'JSON'
+
+  # Backend Tests
+  backend-tests:
+    runs-on: ubuntu-latest
+    needs: code-quality
+    
+    services:
+      mongodb:
+        image: mongo:latest
+        ports:
+          - 27017:27017
+        env:
+          MONGO_INITDB_DATABASE: betting-db-test
+      
+      redis:
+        image: redis:latest
+        ports:
+          - 6379:6379
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: Install server dependencies
+      run: npm ci --prefix server
+
+    - name: Wait for MongoDB
+      run: |
+        until nc -z localhost 27017; do
+          sleep 1
+        done
+
+    - name: Run Unit Tests
+      run: npm run test --prefix server
+      env:
+        NODE_ENV: test
+        MONGODB_URI: mongodb://localhost:27017/betting-db-test
+        REDIS_URL: redis://localhost:6379
+        JWT_SECRET: test-jwt-secret
+        ENCRYPTION_MASTER_KEY: test-master-key-32-characters-long
+        KEY_DERIVATION_SALT: test-salt
+        CSRF_SECRET: test-csrf-secret
+        SESSION_SECRET: test-session-secret
+
+    - name: Run Integration Tests
+      run: npm run test:e2e --prefix server
+      env:
+        NODE_ENV: test
+        MONGODB_URI: mongodb://localhost:27017/betting-db-test
+        REDIS_URL: redis://localhost:6379
+        JWT_SECRET: test-jwt-secret
+
+    - name: Generate Coverage Report
+      run: npm run test:cov --prefix server
+
+    - name: Upload Coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./server/coverage/lcov.info
+        flags: backend
+
+  # Frontend Tests
+  frontend-tests:
+    runs-on: ubuntu-latest
+    needs: code-quality
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ env.NODE_VERSION }}
+        cache: 'npm'
+
+    - name: Install client dependencies
+      run: npm ci --prefix client
+
+    - name: Run Unit Tests
+      run: npm run test --prefix client
+
+    - name: Generate Coverage Report
+      run: npm run test:coverage --prefix client
+
+    - name: Upload Coverage to Codecov
+      uses: codecov/codecov-action@v3
+      with:
+        file: ./client/coverage/lcov.info
+        flags: frontend
+
+    - name: Build Client
+      run: npm run build --prefix client
+      env:
+        VITE_API_URL: ${{ secrets.VITE_API_URL }}
+        VITE_FIREBASE_API_KEY: ${{ secrets.VITE_FIREBASE_API_KEY }}
+        VITE_FIREBASE_AUTH_DOMAIN: ${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+        VITE_FIREBASE_PROJECT_ID: ${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+
+  # Security Scanning
+  security-scan:
+    runs-on: ubuntu-latest
+    needs: code-quality
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Run Snyk Security Scan
+      uses: snyk/actions/node@master
+      env:
+        SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+      with:
+        args: --severity-threshold=high
+
+    - name: Run Semgrep Security Analysis
+      uses: returntocorp/semgrep-action@v1
+      with:
+        config: >-
+          p/security-audit
+          p/secrets
+          p/owasp-top-ten
+
+    - name: Upload SARIF file
+      uses: github/codeql-action/upload-sarif@v2
+      with:
+        sarif_file: semgrep.sarif
+      if: always()
+
+  # Build Docker Images
+  build-images:
+    runs-on: ubuntu-latest
+    needs: [backend-tests, frontend-tests, security-scan]
+    if: github.event_name == 'push'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to Docker Hub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKER_USERNAME }}
+        password: ${{ secrets.DOCKER_PASSWORD }}
+
+    - name: Build and push Backend image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./server
+        file: ./server/Dockerfile
+        push: true
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/sportbet-backend:latest
+          ${{ secrets.DOCKER_USERNAME }}/sportbet-backend:${{ github.sha }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Build and push Frontend image
+      uses: docker/build-push-action@v5
+      with:
+        context: ./client
+        file: ./client/Dockerfile
+        push: true
+        tags: |
+          ${{ secrets.DOCKER_USERNAME }}/sportbet-frontend:latest
+          ${{ secrets.DOCKER_USERNAME }}/sportbet-frontend:${{ github.sha }}
+        build-args: |
+          VITE_API_URL=${{ secrets.VITE_API_URL }}
+          VITE_FIREBASE_API_KEY=${{ secrets.VITE_FIREBASE_API_KEY }}
+          VITE_FIREBASE_AUTH_DOMAIN=${{ secrets.VITE_FIREBASE_AUTH_DOMAIN }}
+          VITE_FIREBASE_PROJECT_ID=${{ secrets.VITE_FIREBASE_PROJECT_ID }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # Deploy to Staging
+  deploy-staging:
+    runs-on: ubuntu-latest
+    needs: build-images
+    if: github.ref == 'refs/heads/develop'
+    environment: staging
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to Render (Staging)
+      run: |
+        curl -X POST "${{ secrets.RENDER_STAGING_DEPLOY_HOOK }}" \
+          -H "Content-Type: application/json" \
+          -d '{"imageTag": "${{ github.sha }}"}'
+
+    - name: Wait for deployment
+      run: sleep 120
+
+    - name: Health Check (Staging)
+      run: |
+        response=$(curl -s -o /dev/null -w "%{http_code}" ${{ secrets.STAGING_API_URL }}/health)
+        if [ $response -ne 200 ]; then
+          echo "Health check failed with status: $response"
+          exit 1
+        fi
+
+    - name: Run Smoke Tests (Staging)
+      run: |
+        npm ci --prefix tests
+        npm run test:smoke:staging --prefix tests
+      env:
+        STAGING_API_URL: ${{ secrets.STAGING_API_URL }}
+
+  # Deploy to Production
+  deploy-production:
+    runs-on: ubuntu-latest
+    needs: deploy-staging
+    if: github.ref == 'refs/heads/main'
+    environment: production
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Database Migration (Production)
+      run: |
+        npm ci --prefix server
+        npm run migration:run --prefix server
+      env:
+        MONGODB_URI: ${{ secrets.PROD_MONGODB_URI }}
+        NODE_ENV: production
+
+    - name: Deploy to Render (Production)
+      run: |
+        curl -X POST "${{ secrets.RENDER_PRODUCTION_DEPLOY_HOOK }}" \
+          -H "Content-Type: application/json" \
+          -d '{"imageTag": "${{ github.sha }}"}'
+
+    - name: Wait for deployment
+      run: sleep 180
+
+    - name: Health Check (Production)
+      run: |
+        response=$(curl -s -o /dev/null -w "%{http_code}" ${{ secrets.PRODUCTION_API_URL }}/health)
+        if [ $response -ne 200 ]; then
+          echo "Production health check failed with status: $response"
+          exit 1
+        fi
+
+    - name: Run Production Smoke Tests
+      run: |
+        npm ci --prefix tests
+        npm run test:smoke:production --prefix tests
+      env:
+        PRODUCTION_API_URL: ${{ secrets.PRODUCTION_API_URL }}
+
+    - name: Notify Deployment Success
+      uses: 8398a7/action-slack@v3
+      with:
+        status: success
+        channel: '#deployments'
+        text: 'SportBet successfully deployed to production! 🚀'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+
+  # Rollback on Failure
+  rollback:
+    runs-on: ubuntu-latest
+    needs: deploy-production
+    if: failure()
+
+    steps:
+    - name: Rollback Production Deployment
+      run: |
+        curl -X POST "${{ secrets.RENDER_PRODUCTION_ROLLBACK_HOOK }}" \
+          -H "Content-Type: application/json"
+
+    - name: Notify Rollback
+      uses: 8398a7/action-slack@v3
+      with:
+        status: failure
+        channel: '#deployments'
+        text: 'SportBet production deployment failed and has been rolled back! ⚠️'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
